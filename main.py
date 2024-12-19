@@ -1,9 +1,10 @@
 import sys
+
 from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QLabel, QLineEdit, QVBoxLayout, QWidget, QTextEdit
 
 # Генерация констант
-def generate_const(w):
-    match w:
+def generate_const(size_subblock):
+    match size_subblock:
         case 16:
             return (0xB7E1, 0x9E37)
         case 32:
@@ -11,86 +12,75 @@ def generate_const(w):
         case 64:
             return (0xB7E151628AED2A6B, 0x9E3779B97F4A7C15)
 
-def extend_key(w, rounds):
-    P, Q = generate_const(w)
-    m = 2 ** w
-    arr_keys = []
-    for i in range(2 * (rounds + 1)):
-        arr_keys.append((P + i * Q) % m)
-    return arr_keys
-
-# Разбиение ключа
-def align_key(key, w):
-    b = len(key)
-    w8 = w // 8
-    if b == 0:
-        c = 1
-    elif b % w8:
-        # дополняем ключ нулевыми байтами, тк его длина должна быть кратна w8
-        key += b'\x00' * (w8 - b % w8)
-        b = len(key)
-        c = b // w8
-    else:
-        c = b // w8
-    L = [0] * c
-    for i in range(b - 1, -1, -1):
-        L[i // w8] = (L[i // w8] << 8) + key[i]
-    return L
-
-# Перемешивание
-def mix_key(S, L, w):
-    i, j, A, B = 0, 0, 0, 0
-    m = 2 ** w
-    for _ in range(3 * max(len(L), len(S))):
-        A = S[i] = (S[i] + A + B) % m
-        A = (A << 3) | (A >> (w - 3))
-        B = L[j] = (L[j] + A + B) % m
-        B = (B << (A % w)) | (B >> (w - (A % w)))
-        i = (i + 1) % len(S)
-        j = (j + 1) % len(L)
-    return S
+# Циклический сдвиг влево
+def cyclic_shift_left(x, d, size_subblock):
+    return (x << d) | (x >> (size_subblock - d))
+# Циклический сдвиг вправо
+def cyclic_shift_right(x, d, size_subblock):
+    return (x >> d) | (x << (size_subblock - d))
 
 # Построение таблицы расширенных ключей
-def generate_key(key, rounds, w):
-    S = extend_key(w, rounds)
-    L = align_key(key, w)
-    S = mix_key(S, L, w)
+def generate_key(key, rounds, size_subblock):
+    P, Q = generate_const(size_subblock)
+    m = 2 ** size_subblock
+    S = []
+    for i in range(2 * (rounds + 1)):
+        S.append((P + i * Q) % m)
+    #  Разбиение ключа
+    u = size_subblock // 8
+    if len(key) % u:
+        key += b' ' * (u - len(key) % u)
+    c = len(key) // u
+    L = []
+    for i in range(c):
+        L.append(0)
+        for j in range((i + 1) * u - 1, i * u - 1, -1):
+            L[i] = (L[i] << 8) + key[j]
+    # Перемешивание ключа
+    i, j, G, H = 0, 0, 0, 0
+    for _ in range(max(3*c, 3*2*(rounds+1))):
+        G = S[i] = (S[i] + G + H) % m
+        G = cyclic_shift_left(G, 3, size_subblock)
+        H = L[j] = (L[j] + G + H) % m
+        H = cyclic_shift_left(H, G % size_subblock, size_subblock)
+        i = (i + 1) % (2*(rounds+1))
+        j = (j + 1) % c
     return S
 
 # Шифрование блока
-def encrypt_block(text, key, rounds, w, c_sym):
-    S = generate_key(key, rounds, w)
-    # левый подблок
+def encrypt_block(text, key, rounds, size_subblock, c_sym):
+    S = generate_key(key, rounds, size_subblock)
+    # Левый подблок
     A = int.from_bytes(text[:c_sym], 'little')
-    # правый подблок
+    # Правый подблок
     B = int.from_bytes(text[c_sym:], 'little')
-    m = 2 ** w
+    m = 2 ** size_subblock
     A = (A + S[0]) % m
     B = (B + S[1]) % m
     for i in range(1, rounds + 1):
-        A = A ^ B # поразрядное суммирование по модулю 2
-        A = (A << (B % w)) | (A >> (w - (B % w))) # циклический сдвиг на B
+        A = A ^ B # Поразрядное суммирование по модулю 2
+        A = cyclic_shift_left(A, B % size_subblock, size_subblock)
         A = (A + S[2 * i]) % m
-        B = B ^ A # поразрядное суммирование по модулю 2
-        B = (B << (A % w)) | (B >> (w - (A % w))) # циклический сдвиг на A
+        B = B ^ A # Поразрядное суммирование по модулю 2
+        B = cyclic_shift_left(B, A % size_subblock, size_subblock)
         B = (B + S[2 * i + 1]) % m
 
     return A.to_bytes(c_sym, 'little') + B.to_bytes(c_sym, 'little')
 
 # Дешифрование блока
-def decrypt_block(text, key, rounds, w, c_sym):
-    S = generate_key(key, rounds, w)
-    # левый подблок
+def decrypt_block(text, key, rounds, size_subblock, c_sym):
+    S = generate_key(key, rounds, size_subblock)
+    # Левый подблок
     A = int.from_bytes(text[:c_sym], 'little')
-    # правый подблок
+    # Правый подблок
     B = int.from_bytes(text[c_sym:], 'little')
-    m = 2 ** w
+    m = 2 ** size_subblock
     for i in range(rounds, 0, -1):
         B = (B - S[2 * i + 1]) % m
-        B = (B >> (A % w)) | (B << (w - (A % w))) # циклический сдвиг на A
+        B = cyclic_shift_right(B, A % size_subblock, size_subblock)
         B = B ^ A # поразрядное суммирование по модулю 2
         A = (A - S[2 * i]) % m
-        A = (A >> (B % w)) | (A << (w - (B % w))) # циклический сдвиг на B
+        A = cyclic_shift_right(A, B % size_subblock, size_subblock) # циклический сдвиг на B
         A = A ^ B # поразрядное суммирование по модулю 2
     B = (B - S[1]) % m
     A = (A - S[0]) % m
@@ -192,7 +182,7 @@ class App(QMainWindow):
             size_block = int(size_block)
             if count_rounds>=0 and count_rounds<=255:
                 if size_block==32 or size_block==64 or size_block==128:
-                    if len(key) >= 0 and len(key) <= 255:
+                    if len(key) > 0 and len(key) <= 255:
                         encrypted = encrypt(text, key, count_rounds, size_block)
                         self.text_output.setPlainText(encrypted)
                     else:
@@ -214,7 +204,7 @@ class App(QMainWindow):
             size_block = int(size_block)
             if count_rounds >= 0 and count_rounds <= 255:
                 if size_block == 32 or size_block == 64 or size_block == 128:
-                    if len(key) >=0 and len(key) <= 255:
+                    if len(key) > 0 and len(key) <= 255:
                         decrypted = decrypt(text, key, count_rounds, size_block)
                         self.text_output.setPlainText(decrypted)
                     else:
