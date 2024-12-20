@@ -1,5 +1,4 @@
 import sys
-
 from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QLabel, QLineEdit, QVBoxLayout, QWidget, QTextEdit
 
 # Генерация констант
@@ -32,13 +31,11 @@ def generate_key(key, rounds, size_subblock):
         key += b' ' * (u - len(key) % u)
     c = len(key) // u
     L = []
-    for i in range(c):
-        L.append(0)
-        for j in range((i + 1) * u - 1, i * u - 1, -1):
-            L[i] = (L[i] << 8) + key[j]
+    for i in range(0, len(key), u):
+        L.append(int.from_bytes(key[i:i + u], byteorder='little'))
     # Перемешивание ключа
     i, j, G, H = 0, 0, 0, 0
-    for _ in range(max(3*c, 3*2*(rounds+1))):
+    for _ in range(max(3*c, 6*(rounds+1))):
         G = S[i] = (S[i] + G + H) % m
         G = cyclic_shift_left(G, 3, size_subblock)
         H = L[j] = (L[j] + G + H) % m
@@ -48,8 +45,7 @@ def generate_key(key, rounds, size_subblock):
     return S
 
 # Шифрование блока
-def encrypt_block(text, key, rounds, size_subblock, c_sym):
-    S = generate_key(key, rounds, size_subblock)
+def encrypt_block(text, rounds, size_subblock, c_sym, S):
     # Левый подблок
     A = int.from_bytes(text[:c_sym], 'little')
     # Правый подблок
@@ -68,8 +64,7 @@ def encrypt_block(text, key, rounds, size_subblock, c_sym):
     return A.to_bytes(c_sym, 'little') + B.to_bytes(c_sym, 'little')
 
 # Дешифрование блока
-def decrypt_block(text, key, rounds, size_subblock, c_sym):
-    S = generate_key(key, rounds, size_subblock)
+def decrypt_block(text, rounds, size_subblock, c_sym, S):
     # Левый подблок
     A = int.from_bytes(text[:c_sym], 'little')
     # Правый подблок
@@ -80,7 +75,7 @@ def decrypt_block(text, key, rounds, size_subblock, c_sym):
         B = cyclic_shift_right(B, A % size_subblock, size_subblock)
         B = B ^ A # поразрядное суммирование по модулю 2
         A = (A - S[2 * i]) % m
-        A = cyclic_shift_right(A, B % size_subblock, size_subblock) # циклический сдвиг на B
+        A = cyclic_shift_right(A, B % size_subblock, size_subblock)
         A = A ^ B # поразрядное суммирование по модулю 2
     B = (B - S[1]) % m
     A = (A - S[0]) % m
@@ -104,8 +99,10 @@ def encrypt(text, key, rounds, size_block):
         text += b' ' * (8 - len(text) % 8)
     count = count_symbol(size_block)
     new_text = ""
+    size_subblock = size_block // 2
+    S = generate_key(key, rounds, size_subblock)
     for i in range(0, len(text), count):
-        new_text += encrypt_block(text[i:i+count], key, rounds, size_block // 2, count//2).hex()
+        new_text += encrypt_block(text[i:i+count], rounds, size_subblock, count//2, S).hex()
     return new_text
 
 # Дешифрование текста
@@ -113,10 +110,12 @@ def decrypt(text, key, rounds, size_block):
     key = key.encode('utf-8')
     count = count_symbol(size_block)
     new_text = ""
+    size_subblock = size_block // 2
+    S = generate_key(key, rounds, size_subblock)
     try:
         text = bytes.fromhex(text)
         for i in range(0, len(text), count):
-            new_text += decrypt_block(text[i:i + count], key, rounds, size_block // 2, count//2).decode('utf-8')
+            new_text += decrypt_block(text[i:i + count], rounds, size_subblock, count//2, S).decode('utf-8')
         return new_text
     except Exception:
         return "Ошибка расшифровки"
